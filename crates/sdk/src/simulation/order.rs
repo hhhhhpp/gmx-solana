@@ -24,6 +24,219 @@ use crate::builders::order::{CreateOrderKind, CreateOrderParams};
 
 use super::simulator::{SimulationOptions, Simulator, SwapOutput};
 
+/// A position adapter used only for simulations.
+///
+/// This wraps a mutable reference to the global `MarketModel` stored in the
+/// simulator together with a mutable reference to a `PositionModel`. It
+/// reuses all position-state logic from `PositionModel` but redirects market
+/// operations to the simulator's market, ensuring that:
+///
+/// - All pool / VI mutations happen on the simulator's market.
+/// - VI state is driven exclusively via `MarketModel::with_vi_models` and the
+///   simulator's global VI map.
+struct SimPosition<'a> {
+    market: &'a mut MarketModel,
+    position: &'a mut PositionModel,
+}
+
+impl gmsol_model::PositionState<{ MARKET_DECIMALS }> for SimPosition<'_> {
+    type Num = u128;
+    type Signed = i128;
+
+    fn collateral_amount(&self) -> &Self::Num {
+        gmsol_model::PositionState::<{ MARKET_DECIMALS }>::collateral_amount(self.position)
+    }
+
+    fn size_in_usd(&self) -> &Self::Num {
+        gmsol_model::PositionState::<{ MARKET_DECIMALS }>::size_in_usd(self.position)
+    }
+
+    fn size_in_tokens(&self) -> &Self::Num {
+        gmsol_model::PositionState::<{ MARKET_DECIMALS }>::size_in_tokens(self.position)
+    }
+
+    fn borrowing_factor(&self) -> &Self::Num {
+        gmsol_model::PositionState::<{ MARKET_DECIMALS }>::borrowing_factor(self.position)
+    }
+
+    fn funding_fee_amount_per_size(&self) -> &Self::Num {
+        gmsol_model::PositionState::<{ MARKET_DECIMALS }>::funding_fee_amount_per_size(
+            self.position,
+        )
+    }
+
+    fn claimable_funding_fee_amount_per_size(&self, is_long_collateral: bool) -> &Self::Num {
+        gmsol_model::PositionState::<{ MARKET_DECIMALS }>::claimable_funding_fee_amount_per_size(
+            self.position,
+            is_long_collateral,
+        )
+    }
+}
+
+impl gmsol_model::PositionStateMut<{ MARKET_DECIMALS }> for SimPosition<'_> {
+    fn collateral_amount_mut(&mut self) -> &mut Self::Num {
+        gmsol_model::PositionStateMut::<{ MARKET_DECIMALS }>::collateral_amount_mut(self.position)
+    }
+
+    fn size_in_usd_mut(&mut self) -> &mut Self::Num {
+        gmsol_model::PositionStateMut::<{ MARKET_DECIMALS }>::size_in_usd_mut(self.position)
+    }
+
+    fn size_in_tokens_mut(&mut self) -> &mut Self::Num {
+        gmsol_model::PositionStateMut::<{ MARKET_DECIMALS }>::size_in_tokens_mut(self.position)
+    }
+
+    fn borrowing_factor_mut(&mut self) -> &mut Self::Num {
+        gmsol_model::PositionStateMut::<{ MARKET_DECIMALS }>::borrowing_factor_mut(self.position)
+    }
+
+    fn funding_fee_amount_per_size_mut(&mut self) -> &mut Self::Num {
+        gmsol_model::PositionStateMut::<{ MARKET_DECIMALS }>::funding_fee_amount_per_size_mut(
+            self.position,
+        )
+    }
+
+    fn claimable_funding_fee_amount_per_size_mut(
+        &mut self,
+        is_long_collateral: bool,
+    ) -> &mut Self::Num {
+        gmsol_model::PositionStateMut::<{ MARKET_DECIMALS }>::claimable_funding_fee_amount_per_size_mut(
+            self.position,
+            is_long_collateral,
+        )
+    }
+}
+
+impl gmsol_model::Position<{ MARKET_DECIMALS }> for SimPosition<'_> {
+    type Market = MarketModel;
+
+    fn market(&self) -> &Self::Market {
+        self.market
+    }
+
+    fn is_long(&self) -> bool {
+        gmsol_model::Position::<{ MARKET_DECIMALS }>::is_long(self.position)
+    }
+
+    fn is_collateral_token_long(&self) -> bool {
+        gmsol_model::Position::<{ MARKET_DECIMALS }>::is_collateral_token_long(self.position)
+    }
+
+    fn are_pnl_and_collateral_tokens_the_same(&self) -> bool {
+        gmsol_model::Position::<{ MARKET_DECIMALS }>::are_pnl_and_collateral_tokens_the_same(
+            self.position,
+        )
+    }
+
+    fn on_validate(&self) -> gmsol_model::Result<()> {
+        gmsol_model::Position::<{ MARKET_DECIMALS }>::on_validate(self.position)
+    }
+}
+
+impl gmsol_model::PositionMut<{ MARKET_DECIMALS }> for SimPosition<'_> {
+    fn market_mut(&mut self) -> &mut Self::Market {
+        self.market
+    }
+
+    fn on_increased(&mut self) -> gmsol_model::Result<()> {
+        gmsol_model::PositionMut::<{ MARKET_DECIMALS }>::on_increased(self.position)
+    }
+
+    fn on_decreased(&mut self) -> gmsol_model::Result<()> {
+        gmsol_model::PositionMut::<{ MARKET_DECIMALS }>::on_decreased(self.position)
+    }
+
+    fn on_swapped(
+        &mut self,
+        ty: gmsol_model::action::decrease_position::DecreasePositionSwapType,
+        report: &SwapReport<Self::Num, <Self::Num as gmsol_model::num::Unsigned>::Signed>,
+    ) -> gmsol_model::Result<()> {
+        gmsol_model::PositionMut::<{ MARKET_DECIMALS }>::on_swapped(self.position, ty, report)
+    }
+
+    fn on_swap_error(
+        &mut self,
+        ty: gmsol_model::action::decrease_position::DecreasePositionSwapType,
+        error: gmsol_model::Error,
+    ) -> gmsol_model::Result<()> {
+        gmsol_model::PositionMut::<{ MARKET_DECIMALS }>::on_swap_error(self.position, ty, error)
+    }
+}
+
+/// Build a `PositionModel` for an increase order.
+fn build_position_model_for_increase(
+    simulator: &Simulator,
+    params: &CreateOrderParams,
+    collateral_or_swap_out_token: &Pubkey,
+    position: Option<&Arc<Position>>,
+) -> crate::Result<PositionModel> {
+    match position {
+        Some(position_account) => {
+            if position_account.collateral_token != *collateral_or_swap_out_token {
+                return Err(crate::Error::custom("[sim] collateral token mismatched"));
+            }
+            let market = simulator
+                .get_market(&params.market_token)
+                .cloned()
+                .expect("market storage must exist");
+            PositionModel::new(market, position_account.clone())
+        }
+        None => {
+            let market = simulator
+                .get_market(&params.market_token)
+                .cloned()
+                .expect("market storage must exist");
+            market.into_empty_position(params.is_long, *collateral_or_swap_out_token)
+        }
+    }
+}
+
+/// Build a `PositionModel` for a decrease order.
+fn build_position_model_for_decrease(
+    simulator: &Simulator,
+    params: &CreateOrderParams,
+    collateral_or_swap_out_token: &Pubkey,
+    position: &Arc<Position>,
+) -> crate::Result<PositionModel> {
+    if position.collateral_token != *collateral_or_swap_out_token {
+        return Err(crate::Error::custom("[sim] collateral token mismatched"));
+    }
+    let market = simulator
+        .get_market(&params.market_token)
+        .cloned()
+        .expect("market storage must exist");
+    PositionModel::new(market, position.clone())
+}
+
+/// Execute a closure with `SimPosition` and VI enabled/disabled via `with_vis_if`.
+fn with_sim_position_for_market<'a, R>(
+    simulator: &'a mut Simulator,
+    params: &'a CreateOrderParams,
+    options: &SimulationOptions,
+    position: &'a mut PositionModel,
+    f: impl FnOnce(&mut SimPosition<'a>) -> crate::Result<R>,
+) -> crate::Result<R> {
+    if options.disable_vis {
+        // VIS disabled: only borrow the market mutably.
+        let market = simulator
+            .get_market_mut(&params.market_token)
+            .expect("market storage must exist");
+
+        market.with_vis_if(None, |market| {
+            let mut sim_position = SimPosition { market, position };
+            f(&mut sim_position)
+        })
+    } else {
+        // VIS enabled: borrow market and VI map together to satisfy the borrow checker.
+        let (market, vi_map) = simulator.get_market_and_vis_mut(&params.market_token)?;
+
+        market.with_vis_if(Some(vi_map), |market| {
+            let mut sim_position = SimPosition { market, position };
+            f(&mut sim_position)
+        })
+    }
+}
+
 /// Order simulation output.
 #[derive(Debug)]
 pub enum OrderSimulationOutput {
@@ -235,70 +448,39 @@ impl OrderSimulation<'_> {
             return Err(crate::Error::custom("[sim] invalid swap path"));
         }
 
-        // Work on a cloned market model, so that position logic operates on an
-        // owned `MarketModel`, while the underlying VI state is shared via the
-        // simulator's global VI map.
-        let mut market = simulator
-            .get_market(&params.market_token)
-            .cloned()
-            .expect("market storage must exist");
+        // Build a position model using a clean market clone (without attached VIs).
+        let mut position = build_position_model_for_increase(
+            simulator,
+            params,
+            collateral_or_swap_out_token,
+            position,
+        )?;
 
-        let mut position = if options.disable_vis {
-            match position {
-                Some(position) => {
-                    if position.collateral_token != *collateral_or_swap_out_token {
-                        return Err(crate::Error::custom("[sim] collateral token mismatched"));
-                    }
-                    market.with_vis_disabled(|market| {
-                        PositionModel::new(market.clone(), position.clone())
-                    })?
-                }
-                None => market.with_vis_disabled(|market| {
-                    market
-                        .clone()
-                        .into_empty_position(params.is_long, *collateral_or_swap_out_token)
-                })?,
-            }
-        } else {
-            match position {
-                Some(position) => {
-                    if position.collateral_token != *collateral_or_swap_out_token {
-                        return Err(crate::Error::custom("[sim] collateral token mismatched"));
-                    }
-                    {
-                        let vi_map = simulator.vis_mut();
-                        market.with_vi_models(vi_map, |market| {
-                            PositionModel::new(market.clone(), position.clone())
-                        })?
-                    }
-                }
-                None => {
-                    let vi_map = simulator.vis_mut();
-                    market.with_vi_models(vi_map, |market| {
-                        market
-                            .clone()
-                            .into_empty_position(params.is_long, *collateral_or_swap_out_token)
-                    })?
-                }
-            }
-        };
+        // Execute the increase logic against the simulator's market with VIs enabled/disabled
+        // through a single unified entry point.
+        let report = with_sim_position_for_market(
+            simulator,
+            params,
+            &options,
+            &mut position,
+            |sim_position| {
+                sim_position
+                    .increase(
+                        prices,
+                        swap_output.amount(),
+                        params.size,
+                        params.acceptable_price,
+                    )?
+                    .execute()
+            },
+        )?;
 
-        let report = position
-            .increase(
-                prices,
-                swap_output.amount(),
-                params.size,
-                params.acceptable_price,
-            )?
-            .execute()?;
-
-        // Persist the evolved market model back into the simulator environment.
-        {
-            let storage = simulator
-                .get_market_mut(&params.market_token)
-                .expect("market storage must exist");
-            *storage = position.market_model().clone();
-        }
+        // Ensure the position's market model is synchronized with the simulator's.
+        position.set_market_model(
+            simulator
+                .get_market(&params.market_token)
+                .expect("market storage must exist"),
+        );
 
         Ok(OrderSimulationOutput::Increase {
             swaps: swap_output.reports,
@@ -379,50 +561,42 @@ impl OrderSimulation<'_> {
             return Err(crate::Error::custom("[sim] collateral token mismatched"));
         }
 
-        // Work on a cloned market model; VI state is shared via simulator's
-        // global VI map when VIS are enabled.
-        let mut market = simulator
-            .get_market(&params.market_token)
-            .cloned()
-            .expect("market storage must exist");
+        // Build a position model using a clean market clone (without attached VIs).
+        let mut position = build_position_model_for_decrease(
+            simulator,
+            params,
+            collateral_or_swap_out_token,
+            position,
+        )?;
 
-        let mut position = if options.disable_vis {
-            market
-                .with_vis_disabled(|market| PositionModel::new(market.clone(), position.clone()))?
-        } else {
-            let vi_map = simulator.vis_mut();
-            market.with_vi_models(vi_map, |market| {
-                PositionModel::new(market.clone(), position.clone())
-            })?
-        };
-
-        let report = position
-            .decrease(
-                prices,
-                params.size,
-                params.acceptable_price,
-                params.amount,
-                DecreasePositionFlags {
-                    is_insolvent_close_allowed: false,
-                    is_liquidation_order: false,
-                    is_cap_size_delta_usd_allowed: false,
-                },
-            )?
-            .set_swap(
-                params
-                    .decrease_position_swap_type
-                    .map(Into::into)
-                    .unwrap_or_default(),
-            )
-            .execute()?;
-
-        // Persist the evolved market model back into the simulator environment.
-        {
-            let storage = simulator
-                .get_market_mut(&params.market_token)
-                .expect("market storage must exist");
-            *storage = position.market_model().clone();
-        }
+        // Execute the decrease logic against the simulator's market with VIs enabled/disabled.
+        let report = with_sim_position_for_market(
+            simulator,
+            params,
+            &options,
+            &mut position,
+            |sim_position| {
+                sim_position
+                    .decrease(
+                        prices,
+                        params.size,
+                        params.acceptable_price,
+                        params.amount,
+                        DecreasePositionFlags {
+                            is_insolvent_close_allowed: false,
+                            is_liquidation_order: false,
+                            is_cap_size_delta_usd_allowed: false,
+                        },
+                    )?
+                    .set_swap(
+                        params
+                            .decrease_position_swap_type
+                            .map(Into::into)
+                            .unwrap_or_default(),
+                    )
+                    .execute()
+            },
+        )?;
 
         let swaps = if !report.output_amount().is_zero() {
             let source_token = collateral_or_swap_out_token;
@@ -439,16 +613,18 @@ impl OrderSimulation<'_> {
                     swap_output.output_token()
                 )));
             }
-            // Ensure the market model of the position is in-sync with the simulator's.
-            position.set_market_model(
-                simulator
-                    .get_market(&params.market_token)
-                    .expect("market storage must exist"),
-            );
             swap_output.reports
         } else {
             vec![]
         };
+
+        // Ensure the market model of the position is in-sync with the simulator's,
+        // regardless of whether a post-decrease swap has been executed.
+        position.set_market_model(
+            simulator
+                .get_market(&params.market_token)
+                .expect("market storage must exist"),
+        );
 
         Ok(OrderSimulationOutput::Decrease {
             swaps,
