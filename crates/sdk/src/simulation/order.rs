@@ -179,14 +179,14 @@ fn build_position_model_for_increase(
                 .get_market(&params.market_token)
                 .cloned()
                 .expect("market storage must exist");
-            PositionModel::new(market, position_account.clone())
+            Ok(PositionModel::new(market, position_account.clone())?)
         }
         None => {
             let market = simulator
                 .get_market(&params.market_token)
                 .cloned()
                 .expect("market storage must exist");
-            market.into_empty_position(params.is_long, *collateral_or_swap_out_token)
+            Ok(market.into_empty_position(params.is_long, *collateral_or_swap_out_token)?)
         }
     }
 }
@@ -205,35 +205,111 @@ fn build_position_model_for_decrease(
         .get_market(&params.market_token)
         .cloned()
         .expect("market storage must exist");
-    PositionModel::new(market, position.clone())
+    Ok(PositionModel::new(market, position.clone())?)
 }
 
-/// Execute a closure with `SimPosition` and VI enabled/disabled via `with_vis_if`.
-fn with_sim_position_for_market<'a, R>(
-    simulator: &'a mut Simulator,
-    params: &'a CreateOrderParams,
+/// Execute an increase with `SimPosition` and VI enabled/disabled via `with_vis_if`.
+fn run_increase_with_sim_position(
+    simulator: &mut Simulator,
+    params: &CreateOrderParams,
     options: &SimulationOptions,
-    position: &'a mut PositionModel,
-    f: impl FnOnce(&mut SimPosition<'a>) -> crate::Result<R>,
-) -> crate::Result<R> {
+    position: &mut PositionModel,
+    prices: gmsol_model::price::Prices<u128>,
+    swap_amount: u128,
+) -> crate::Result<IncreasePositionReport<u128, i128>> {
     if options.disable_vis {
         // VIS disabled: only borrow the market mutably.
         let market = simulator
             .get_market_mut(&params.market_token)
             .expect("market storage must exist");
 
-        market.with_vis_if(None, |market| {
+        let result = market.with_vis_if(None, |market| {
             let mut sim_position = SimPosition { market, position };
-            f(&mut sim_position)
-        })
+            sim_position
+                .increase(prices, swap_amount, params.size, params.acceptable_price)?
+                .execute()
+        });
+
+        Ok(result?)
     } else {
         // VIS enabled: borrow market and VI map together to satisfy the borrow checker.
         let (market, vi_map) = simulator.get_market_and_vis_mut(&params.market_token)?;
 
-        market.with_vis_if(Some(vi_map), |market| {
+        let result = market.with_vis_if(Some(vi_map), |market| {
             let mut sim_position = SimPosition { market, position };
-            f(&mut sim_position)
-        })
+            sim_position
+                .increase(prices, swap_amount, params.size, params.acceptable_price)?
+                .execute()
+        });
+
+        Ok(result?)
+    }
+}
+
+/// Execute a decrease with `SimPosition` and VI enabled/disabled via `with_vis_if`.
+fn run_decrease_with_sim_position(
+    simulator: &mut Simulator,
+    params: &CreateOrderParams,
+    options: &SimulationOptions,
+    position: &mut PositionModel,
+    prices: gmsol_model::price::Prices<u128>,
+) -> crate::Result<DecreasePositionReport<u128, i128>> {
+    if options.disable_vis {
+        let market = simulator
+            .get_market_mut(&params.market_token)
+            .expect("market storage must exist");
+
+        let result = market.with_vis_if(None, |market| {
+            let mut sim_position = SimPosition { market, position };
+            sim_position
+                .decrease(
+                    prices,
+                    params.size,
+                    params.acceptable_price,
+                    params.amount,
+                    DecreasePositionFlags {
+                        is_insolvent_close_allowed: false,
+                        is_liquidation_order: false,
+                        is_cap_size_delta_usd_allowed: false,
+                    },
+                )?
+                .set_swap(
+                    params
+                        .decrease_position_swap_type
+                        .map(Into::into)
+                        .unwrap_or_default(),
+                )
+                .execute()
+        });
+
+        Ok(*result?)
+    } else {
+        let (market, vi_map) = simulator.get_market_and_vis_mut(&params.market_token)?;
+
+        let result = market.with_vis_if(Some(vi_map), |market| {
+            let mut sim_position = SimPosition { market, position };
+            sim_position
+                .decrease(
+                    prices,
+                    params.size,
+                    params.acceptable_price,
+                    params.amount,
+                    DecreasePositionFlags {
+                        is_insolvent_close_allowed: false,
+                        is_liquidation_order: false,
+                        is_cap_size_delta_usd_allowed: false,
+                    },
+                )?
+                .set_swap(
+                    params
+                        .decrease_position_swap_type
+                        .map(Into::into)
+                        .unwrap_or_default(),
+                )
+                .execute()
+        });
+
+        Ok(*result?)
     }
 }
 
@@ -456,23 +532,14 @@ impl OrderSimulation<'_> {
             position,
         )?;
 
-        // Execute the increase logic against the simulator's market with VIs enabled/disabled
-        // through a single unified entry point.
-        let report = with_sim_position_for_market(
+        // Execute the increase logic against the simulator's market with VIs enabled/disabled.
+        let report = run_increase_with_sim_position(
             simulator,
             params,
             &options,
             &mut position,
-            |sim_position| {
-                sim_position
-                    .increase(
-                        prices,
-                        swap_output.amount(),
-                        params.size,
-                        params.acceptable_price,
-                    )?
-                    .execute()
-            },
+            prices,
+            swap_output.amount(),
         )?;
 
         // Ensure the position's market model is synchronized with the simulator's.
@@ -570,33 +637,8 @@ impl OrderSimulation<'_> {
         )?;
 
         // Execute the decrease logic against the simulator's market with VIs enabled/disabled.
-        let report = with_sim_position_for_market(
-            simulator,
-            params,
-            &options,
-            &mut position,
-            |sim_position| {
-                sim_position
-                    .decrease(
-                        prices,
-                        params.size,
-                        params.acceptable_price,
-                        params.amount,
-                        DecreasePositionFlags {
-                            is_insolvent_close_allowed: false,
-                            is_liquidation_order: false,
-                            is_cap_size_delta_usd_allowed: false,
-                        },
-                    )?
-                    .set_swap(
-                        params
-                            .decrease_position_swap_type
-                            .map(Into::into)
-                            .unwrap_or_default(),
-                    )
-                    .execute()
-            },
-        )?;
+        let report =
+            run_decrease_with_sim_position(simulator, params, &options, &mut position, prices)?;
 
         let swaps = if !report.output_amount().is_zero() {
             let source_token = collateral_or_swap_out_token;
@@ -628,7 +670,7 @@ impl OrderSimulation<'_> {
 
         Ok(OrderSimulationOutput::Decrease {
             swaps,
-            report,
+            report: Box::new(report),
             position,
         })
     }
