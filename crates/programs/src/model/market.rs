@@ -259,6 +259,16 @@ impl MarketModel {
         &self.swap_pricing
     }
 
+    /// Returns whether virtual inventories are disabled.
+    pub fn disable_vis(&self) -> bool {
+        self.disable_vis
+    }
+
+    /// Sets whether virtual inventories are disabled.
+    pub fn set_disable_vis(&mut self, disable_vis: bool) {
+        self.disable_vis = disable_vis;
+    }
+
     /// Execute a function with the specified swap pricing kind.
     ///
     /// # Panic Safety

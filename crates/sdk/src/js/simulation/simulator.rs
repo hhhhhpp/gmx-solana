@@ -139,6 +139,7 @@ impl JsSimulator {
     /// Set whether to disable virtual inventories for simulations.
     pub fn set_disable_vis(&mut self, disable: bool) {
         self.disable_vis = disable;
+        self.simulator.set_disable_vis(disable);
     }
 
     /// Get whether virtual inventories are disabled.

@@ -265,6 +265,13 @@ impl Simulator {
         self.glvs.get_mut(glv_token)
     }
 
+    /// Set whether virtual inventories are disabled for all markets.
+    pub fn set_disable_vis(&mut self, disable: bool) {
+        for market in self.markets.values_mut() {
+            market.set_disable_vis(disable);
+        }
+    }
+
     /// Insert GLV model.
     pub fn insert_glv(&mut self, glv: GlvModel) -> Option<GlvModel> {
         self.glvs.insert(glv.glv_token, glv)
